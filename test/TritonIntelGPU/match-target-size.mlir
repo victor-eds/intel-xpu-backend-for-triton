@@ -227,6 +227,51 @@ tt.func public @simplify_scf_for(%arg0: tensor<16x8xf16>, %arg1: tensor<16x8xf16
 
 // -----
 
+// COM: Test SCF canonicalization: ensure loop canonicalization can be applied to dependendent loops
+tt.func public @simplify_scf_for(%arg0: tensor<16x8xf16>, %arg1: tensor<16x8xf16>, %arg2: !tt.ptr<f16, 1>,
+                                 %arg3: i64, %arg4: i64, %arg5: i64, %arg6: i32, %arg7: i32) {
+  // CHECK-LABEL: @simplify_scf_for
+  // CHECK-NOT: triton_intel_gpu.glue
+  // CHECK:      [[RES:%.*]]:2 = scf.for {{.*}} iter_args([[INIT1:%.*]] = %arg0, [[INIT2:%.*]] = %arg1)
+  // CHECK-SAME:               -> (tensor<16x8xf16>, tensor<16x8xf16>) : i32 {
+  // CHECK-NEXT:   scf.yield [[INIT2]], [[INIT1]] : tensor<16x8xf16>, tensor<16x8xf16>
+  // CHECK-NEXT: }
+  // CHECK:      [[RES2:%.*]]:2 = scf.for {{.*}} iter_args([[INIT3:%.*]] = [[RES]]#0, [[INIT4:%.*]] = [[RES]]#1)
+  // CHECK-SAME:               -> (tensor<16x8xf16>, tensor<16x8xf16>) : i32 {
+  // CHECK-NEXT:   scf.yield [[INIT3]], [[INIT4]] : tensor<16x8xf16>, tensor<16x8xf16>
+  // CHECK-NEXT: }
+  // CHECK-NEXT: [[GLUE:%.*]] = triton_intel_gpu.glue [[RES2]]#1, [[RES2]]#0
+  // CHECK-SAME:              : (tensor<16x8xf16>, tensor<16x8xf16>) -> tensor<16x16xf16>
+  // CHECK-NEXT: [[PTR:%.*]] = tt.make_tensor_ptr %arg2
+  // CHECK-NEXT: tt.store [[PTR]], [[GLUE]]
+  %lb = arith.constant 0 : i32
+  %ub = arith.constant 32 : i32
+  %st = arith.constant 1 : i32
+  %c1_i64 = arith.constant 1 : i64
+  %cst = arith.constant dense<42.0> : tensor<16x16xf16>
+  %glue = triton_intel_gpu.glue %arg0, %arg1 : (tensor<16x8xf16>, tensor<16x8xf16>) -> tensor<16x16xf16>
+  %res = scf.for %iv = %lb to %ub step %st iter_args(%arg = %glue) -> (tensor<16x16xf16>) : i32 {
+    %e1 = triton_intel_gpu.extract %arg[1] : tensor<16x16xf16> -> tensor<16x8xf16>
+    %e2 = triton_intel_gpu.extract %arg[0] : tensor<16x16xf16> -> tensor<16x8xf16>
+    %g1 = triton_intel_gpu.glue %e1, %e2 : (tensor<16x8xf16>, tensor<16x8xf16>) -> tensor<16x16xf16>
+    scf.yield %g1 : tensor<16x16xf16>
+  }
+  %res2 = scf.for %iv = %lb to %ub step %st iter_args(%arg = %res) -> (tensor<16x16xf16>) : i32 {
+    %e1 = triton_intel_gpu.extract %arg[0] : tensor<16x16xf16> -> tensor<16x8xf16>
+    %e2 = triton_intel_gpu.extract %arg[1] : tensor<16x16xf16> -> tensor<16x8xf16>
+    %g1 = triton_intel_gpu.glue %e1, %e2 : (tensor<16x8xf16>, tensor<16x8xf16>) -> tensor<16x16xf16>
+    scf.yield %g1 : tensor<16x16xf16>
+  }
+  %e3 = triton_intel_gpu.extract %res2[0] : tensor<16x16xf16> -> tensor<16x8xf16>
+  %e4 = triton_intel_gpu.extract %res2[1] : tensor<16x16xf16> -> tensor<16x8xf16>
+  %g2 = triton_intel_gpu.glue %e4, %e3 : (tensor<16x8xf16>, tensor<16x8xf16>) -> tensor<16x16xf16>
+  %ptr = tt.make_tensor_ptr %arg2, [%arg3, %arg4], [%arg5, %c1_i64], [%arg6, %arg7] {order = array<i32: 1, 0>} : <tensor<16x16xf16>>
+  tt.store %ptr, %g2 {boundaryCheck = array<i32: 0, 1>, cache = 1 : i32, evict = 1 : i32} : !tt.ptr<tensor<16x16xf16>>
+  tt.return
+}
+
+// -----
+
 // COM: Test transformation for int8 datatype
 
 // CHECK-LABEL: @matmul_kernel_with_block_pointers_int8
@@ -423,7 +468,7 @@ tt.func public @attn_fwd(%arg0: !tt.ptr<f16>, %arg1: !tt.ptr<f16>, %arg2: !tt.pt
     %34 = arith.mulf %30, %24 : tensor<16x64xf32, #warp>
 
     // CHECK: tt.expand_dims {{.*}} {axis = 1 : i32} : tensor<16xf32
-    // CHECK: triton_intel_gpu.broadcast {{.*}} -> tensor<16x16xf32>
+    // CHECK: tt.broadcast {{.*}} -> tensor<16x16xf32>
     %35 = tt.expand_dims %33 {axis = 1 : i32} : tensor<16xf32, #triton_gpu.slice<{dim = 1, parent = #warp}>> -> tensor<16x1xf32, #warp>
     %36 = tt.broadcast %35 : tensor<16x1xf32, #warp> -> tensor<16x64xf32, #warp>
     %37 = arith.subf %34, %36 : tensor<16x64xf32, #warp>
@@ -488,7 +533,7 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 8 :
     %2 = tt.expand_dims %0 {axis = 1 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 1, parent = #warp}>> -> tensor<16x1xi32, #warp>
     %3 = tt.expand_dims %1 {axis = 0 : i32} : tensor<64xi32, #triton_gpu.slice<{dim = 0, parent = #warp}>> -> tensor<1x64xi32, #warp>
 
-    // CHECK: %[[BC1:.*]] = triton_intel_gpu.broadcast %[[ED1]] : tensor<16x1xi32, #warp> -> tensor<16x16xi32>
+    // CHECK: %[[BC1:.*]] = tt.broadcast %[[ED1]] : tensor<16x1xi32, #warp> -> tensor<16x16xi32>
     %4 = tt.broadcast %2 : tensor<16x1xi32, #warp> -> tensor<16x64xi32, #warp>
 
     // CHECK: %[[EX0:.*]] = triton_intel_gpu.extract %[[ED2]][0] : tensor<1x64xi32, #warp> -> tensor<1x16xi32>

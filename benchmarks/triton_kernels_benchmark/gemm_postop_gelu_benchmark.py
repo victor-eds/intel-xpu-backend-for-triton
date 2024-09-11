@@ -1,12 +1,12 @@
 """
-Gemm benchmark
-============================
+Gemm + PostOp (Gelu) benchmark
+==============================
 
-This benchmark is come from the Triton tutorial 10-experimental-block-pointer.py
-To compare the performance to XeTLA kernel.
+This benchmark is modified from gemm_benchmark.py to include a post-operation (Gelu) on the output of the gemm operation.
 
 """
 
+import math
 import torch
 import intel_extension_for_pytorch  # type: ignore # noqa: F401
 
@@ -14,26 +14,42 @@ import triton
 import triton.language as tl
 
 import triton_kernels_benchmark as benchmark_suit
-from triton_kernels_benchmark import xetla_kernel  # pylint: disable=no-name-in-module
+
+kAlpha = tl.constexpr(math.sqrt(2.0 / math.pi))
+
+
+@triton.jit
+def tanh(x):
+    return 2 * tl.sigmoid(2 * x) - 1
+
+
+@triton.jit
+def gelu(x):
+    """
+    GeLU_ activation - Gaussian error linear unit
+
+    .. _GeLU: https://arxiv.org/pdf/1606.08415.pdf
+    """
+    return 0.5 * x * (1 + tanh(kAlpha * (x + 0.044715 * x * x * x)))
 
 
 @triton.autotune(
     configs=[
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [1, 2, 3]
-    ] + [
+            num_stages=2, num_warps=32),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
+            num_stages=3, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2, 3]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2, 3]
+            num_stages=2, num_warps=32),
     ],
     key=['M', 'N', 'K'],
 )
@@ -73,7 +89,7 @@ def matmul_kernel_with_block_pointers(
         accumulator += tl.dot(a, b)
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
-    c = accumulator.to(tl.float32)
+    c = gelu(accumulator)
 
     c_block_ptr = tl.make_block_ptr(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
                                     offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
@@ -86,23 +102,22 @@ def matmul_kernel_with_block_pointers(
     configs=[
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2, 3]
-    ] + [
+            num_stages=2, num_warps=32),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
+            num_stages=3, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'grf_mode': 'large'},
-            num_stages=s, num_warps=4) for s in [2]
+            num_stages=2, num_warps=4),
     ],
     key=['M', 'N', 'K'],
 )
@@ -146,7 +161,7 @@ def matmul_kernel_with_block_pointers_batched(
         accumulator += tl.dot(a, b)
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
-    c = accumulator.to(tl.float32)
+    c = gelu(accumulator)
 
     offset_c = bid.to(tl.int64) * stride_cz
     c_block_ptr = tl.make_block_ptr(base=c_ptr + offset_c, shape=(M, N), strides=(stride_cm, stride_cn),
@@ -231,9 +246,9 @@ def matmul(a, b):
         line_arg='provider',
         # argument name whose value corresponds to a different line in the plot
         # possible values for `line_arg``
-        line_vals=['triton', 'xetla'],
+        line_vals=['triton'],
         # label name for the lines
-        line_names=['Triton', 'XeTLA'],
+        line_names=['Triton'],
         # line styles
         styles=[('green', '-'), ('green', '--'), ('blue', '-'), ('blue', '--')],
         ylabel=['GB/s', 'TFlops'],  # label name for the y-axis
@@ -251,31 +266,12 @@ def benchmark(B, M, N, K, provider):
 
     quantiles = [0.5, 0.0, 1.0]
 
-    if provider == 'onednn':
-        _, min_ms, max_ms, mean_ms, cv = benchmark_suit.do_bench(lambda: torch.matmul(a, b), warmup=10, rep=10,
-                                                                 quantiles=quantiles, fast_flush=False)
-    elif provider == 'triton':
+    if provider == 'triton':
         triton_fn = lambda: matmul(a, b)
-        torch_fn = lambda: torch.matmul(a, b).to(torch.float32)
+        torch_fn = lambda: torch.nn.functional.gelu(torch.matmul(a, b).to(torch.float32))
         rtol = 1e-2 if a.dtype == torch.bfloat16 else 1e-3
         benchmark_suit.assert_close(triton_fn(), torch_fn(), atol=1e-4, rtol=rtol, err_msg='triton to torch')
         _, min_ms, max_ms, mean_ms, cv = benchmark_suit.do_bench(triton_fn, warmup=10, rep=10, quantiles=quantiles,
-                                                                 fast_flush=False)
-    elif provider == 'xetla':
-        if B == 1:
-            c = torch.empty((M, N), device='xpu', dtype=torch.float32)
-            acc = torch.empty((M, N), device='xpu', dtype=torch.float32)
-            cnt = torch.empty((M, N), device='xpu', dtype=torch.int32)
-        else:
-            c = torch.empty((B, M, N), device='xpu', dtype=torch.float32)
-            acc = torch.empty((B, M, N), device='xpu', dtype=torch.float32)
-            cnt = torch.empty((B, M, N), device='xpu', dtype=torch.int32)
-        name = f'gemm_shape_{B}_{M}_{K}_{N}'
-        func = getattr(xetla_kernel, name)
-        xetla_fn = lambda: func(a, b, c, acc, cnt)
-        torch_fn = lambda: torch.matmul(a, b).to(torch.float32)
-        # benchmark_suit.assert_close(xetla_fn(), torch_fn(), atol=1e-4, rtol=1.0, err_msg='xetla to torch')
-        _, min_ms, max_ms, mean_ms, cv = benchmark_suit.do_bench(xetla_fn, warmup=10, rep=10, quantiles=quantiles,
                                                                  fast_flush=False)
     else:
         raise NotImplementedError(f'Unsupported provider {provider}')

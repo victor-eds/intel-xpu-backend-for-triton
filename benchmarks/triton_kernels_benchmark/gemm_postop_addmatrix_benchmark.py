@@ -1,9 +1,8 @@
 """
-Gemm benchmark
-============================
+Gemm + PostOp (add matrix) benchmark
+====================================
 
-This benchmark is come from the Triton tutorial 10-experimental-block-pointer.py
-To compare the performance to XeTLA kernel.
+This benchmark is modified from gemm_benchmark.py to add a matrix to the output of the gemm operation.
 
 """
 
@@ -14,39 +13,39 @@ import triton
 import triton.language as tl
 
 import triton_kernels_benchmark as benchmark_suit
-from triton_kernels_benchmark import xetla_kernel  # pylint: disable=no-name-in-module
 
 
 @triton.autotune(
     configs=[
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [1, 2, 3]
-    ] + [
+            num_stages=2, num_warps=32),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
+            num_stages=3, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2, 3]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2, 3]
+            num_stages=2, num_warps=32),
     ],
     key=['M', 'N', 'K'],
 )
 @triton.jit
 def matmul_kernel_with_block_pointers(
         # Pointers to matrices
-        a_ptr, b_ptr, c_ptr,
+        a_ptr, b_ptr, c_ptr, d_ptr,
         # Matrix dimensions
         M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
         # Stride variables
         stride_am: tl.constexpr, stride_ak: tl.constexpr,  #
         stride_bk: tl.constexpr, stride_bn: tl.constexpr,  #
-        stride_cm: tl.constexpr, stride_cn: tl.constexpr,
+        stride_cm: tl.constexpr, stride_cn: tl.constexpr,  #
+        stride_dm: tl.constexpr, stride_dn: tl.constexpr,
         # Meta-parameters
         BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr):
     pid = tl.program_id(axis=0)
@@ -73,7 +72,12 @@ def matmul_kernel_with_block_pointers(
         accumulator += tl.dot(a, b)
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
-    c = accumulator.to(tl.float32)
+
+    d_block_ptr = tl.make_block_ptr(base=d_ptr, shape=(M, N), strides=(stride_dm, stride_dn),
+                                    offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
+                                    block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1, 0))
+    d = tl.load(d_block_ptr, boundary_check=(0, 1))
+    c = accumulator + d
 
     c_block_ptr = tl.make_block_ptr(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
                                     offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
@@ -86,36 +90,36 @@ def matmul_kernel_with_block_pointers(
     configs=[
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2, 3]
-    ] + [
+            num_stages=2, num_warps=32),
+        triton.Config(
+            {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
+            num_stages=3, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 512, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'grf_mode': 'large'},
-            num_stages=s, num_warps=32) for s in [2]
-    ] + [
+            num_stages=2, num_warps=32),
         triton.Config(
             {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1, 'grf_mode': 'large'},
-            num_stages=s, num_warps=4) for s in [2]
+            num_stages=2, num_warps=4),
     ],
     key=['M', 'N', 'K'],
 )
 @triton.jit
 def matmul_kernel_with_block_pointers_batched(
         # Pointers to matrices
-        a_ptr, b_ptr, c_ptr,
+        a_ptr, b_ptr, c_ptr, d_ptr,
         # Matrix dimensions
         B: tl.constexpr, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
         # Stride variables
         stride_az: tl.constexpr, stride_am: tl.constexpr, stride_ak: tl.constexpr,  #
         stride_bz: tl.constexpr, stride_bk: tl.constexpr, stride_bn: tl.constexpr,  #
-        stride_cz: tl.constexpr, stride_cm: tl.constexpr, stride_cn: tl.constexpr,
+        stride_cz: tl.constexpr, stride_cm: tl.constexpr, stride_cn: tl.constexpr,  #
+        stride_dz: tl.constexpr, stride_dm: tl.constexpr, stride_dn: tl.constexpr,
         # Meta-parameters
         BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr):
     bid = tl.program_id(axis=0)
@@ -146,7 +150,13 @@ def matmul_kernel_with_block_pointers_batched(
         accumulator += tl.dot(a, b)
         a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
         b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
-    c = accumulator.to(tl.float32)
+
+    offset_d = bid.to(tl.int64) * stride_dz
+    d_block_ptr = tl.make_block_ptr(base=d_ptr + offset_d, shape=(M, N), strides=(stride_dm, stride_dn),
+                                    offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
+                                    block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N), order=(1, 0))
+    d = tl.load(d_block_ptr, boundary_check=(0, 1))
+    c = accumulator + d
 
     offset_c = bid.to(tl.int64) * stride_cz
     c_block_ptr = tl.make_block_ptr(base=c_ptr + offset_c, shape=(M, N), strides=(stride_cm, stride_cn),
@@ -157,7 +167,7 @@ def matmul_kernel_with_block_pointers_batched(
 
 # We can now create a convenience wrapper function that only takes two input tensors,
 # and (1) checks any shape constraint; (2) allocates the output; (3) launches the above kernel.
-def matmul(a, b):
+def matmul(a, b, d):
     # Check constraints.
     if len(a.shape) == 3 and len(b.shape) == 3:
         assert a.shape[0] == b.shape[0], 'Incompatible Batch dimension'
@@ -174,11 +184,12 @@ def matmul(a, b):
             triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
         )
         matmul_kernel_with_block_pointers_batched[grid](
-            a, b, c,  #
+            a, b, c, d,  #
             B, M, N, K,  #
             a.stride(0), a.stride(1), a.stride(2),  #
             b.stride(0), b.stride(1), b.stride(2),  #
-            c.stride(0), c.stride(1), c.stride(2))
+            c.stride(0), c.stride(1), c.stride(2),  #
+            d.stride(0), d.stride(1), d.stride(2))
     elif len(a.shape) == 2 and len(b.shape) == 2:
         assert a.shape[1] == b.shape[0], 'Incompatible dimensions'
         assert a.is_contiguous(), 'Matrix A must be contiguous'
@@ -189,11 +200,12 @@ def matmul(a, b):
         c = torch.empty((M, N), device=a.device, dtype=torch.float32)
         grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
         matmul_kernel_with_block_pointers[grid](
-            a, b, c,  #
+            a, b, c, d,  #
             M, N, K,  #
             a.stride(0), a.stride(1),  #
             b.stride(0), b.stride(1),  #
-            c.stride(0), c.stride(1))
+            c.stride(0), c.stride(1),  #
+            d.stride(0), d.stride(1))
     else:
         assert False, 'Input matrixs dimensions mismatch'
     return c
@@ -231,9 +243,9 @@ def matmul(a, b):
         line_arg='provider',
         # argument name whose value corresponds to a different line in the plot
         # possible values for `line_arg``
-        line_vals=['triton', 'xetla'],
+        line_vals=['triton'],
         # label name for the lines
-        line_names=['Triton', 'XeTLA'],
+        line_names=['Triton'],
         # line styles
         styles=[('green', '-'), ('green', '--'), ('blue', '-'), ('blue', '--')],
         ylabel=['GB/s', 'TFlops'],  # label name for the y-axis
@@ -245,37 +257,20 @@ def benchmark(B, M, N, K, provider):
     if B == 1:
         a = torch.rand((M, K), device='xpu', dtype=torch.bfloat16)
         b = torch.rand((K, N), device='xpu', dtype=torch.bfloat16)
+        d = torch.rand((M, N), device='xpu', dtype=torch.float32)
     else:
         a = torch.rand((B, M, K), device='xpu', dtype=torch.bfloat16)
         b = torch.rand((B, K, N), device='xpu', dtype=torch.bfloat16)
+        d = torch.rand((B, M, N), device='xpu', dtype=torch.float32)
 
     quantiles = [0.5, 0.0, 1.0]
 
-    if provider == 'onednn':
-        _, min_ms, max_ms, mean_ms, cv = benchmark_suit.do_bench(lambda: torch.matmul(a, b), warmup=10, rep=10,
-                                                                 quantiles=quantiles, fast_flush=False)
-    elif provider == 'triton':
-        triton_fn = lambda: matmul(a, b)
-        torch_fn = lambda: torch.matmul(a, b).to(torch.float32)
+    if provider == 'triton':
+        triton_fn = lambda: matmul(a, b, d)
+        torch_fn = lambda: torch.matmul(a, b).to(torch.float32) + d
         rtol = 1e-2 if a.dtype == torch.bfloat16 else 1e-3
         benchmark_suit.assert_close(triton_fn(), torch_fn(), atol=1e-4, rtol=rtol, err_msg='triton to torch')
         _, min_ms, max_ms, mean_ms, cv = benchmark_suit.do_bench(triton_fn, warmup=10, rep=10, quantiles=quantiles,
-                                                                 fast_flush=False)
-    elif provider == 'xetla':
-        if B == 1:
-            c = torch.empty((M, N), device='xpu', dtype=torch.float32)
-            acc = torch.empty((M, N), device='xpu', dtype=torch.float32)
-            cnt = torch.empty((M, N), device='xpu', dtype=torch.int32)
-        else:
-            c = torch.empty((B, M, N), device='xpu', dtype=torch.float32)
-            acc = torch.empty((B, M, N), device='xpu', dtype=torch.float32)
-            cnt = torch.empty((B, M, N), device='xpu', dtype=torch.int32)
-        name = f'gemm_shape_{B}_{M}_{K}_{N}'
-        func = getattr(xetla_kernel, name)
-        xetla_fn = lambda: func(a, b, c, acc, cnt)
-        torch_fn = lambda: torch.matmul(a, b).to(torch.float32)
-        # benchmark_suit.assert_close(xetla_fn(), torch_fn(), atol=1e-4, rtol=1.0, err_msg='xetla to torch')
-        _, min_ms, max_ms, mean_ms, cv = benchmark_suit.do_bench(xetla_fn, warmup=10, rep=10, quantiles=quantiles,
                                                                  fast_flush=False)
     else:
         raise NotImplementedError(f'Unsupported provider {provider}')
