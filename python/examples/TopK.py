@@ -164,14 +164,14 @@ for n in [2**i for i in range(5, 12)]:
             globals={'x': x, 'k': k},
             label=label,
             sub_label=sub_label,
-            description='Triton').adaptive_autorange())
+            description='Triton').blocked_autorange())
         results.append(benchmark.Timer(
             stmt='run_pytorch(x, k)',
             setup='from __main__ import run_pytorch',
             globals={'x': x, 'k': k},
             label=label,
             sub_label=sub_label,
-            description='PyTorch').adaptive_autorange())
+            description='PyTorch').blocked_autorange())
 
 
 compare = benchmark.Compare(results)
